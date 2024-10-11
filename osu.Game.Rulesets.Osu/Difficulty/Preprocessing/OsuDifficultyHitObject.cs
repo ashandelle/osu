@@ -145,11 +145,15 @@ namespace osu.Game.Rulesets.Osu.Difficulty.Preprocessing
         private readonly OsuDifficultyHitObject? lastLastDifficultyObject;
         private readonly OsuDifficultyHitObject? lastDifficultyObject;
 
+        private readonly Mod[] mods;
+
         public OsuDifficultyHitObject(HitObject hitObject, HitObject lastObject, double clockRate, List<DifficultyHitObject> objects, int index, Mod[] mods)
             : base(hitObject, lastObject, clockRate, objects, index)
         {
             lastLastDifficultyObject = index > 1 ? (OsuDifficultyHitObject)objects[index - 2] : null;
             lastDifficultyObject = index > 0 ? (OsuDifficultyHitObject)objects[index - 1] : null;
+            
+            this.mods = mods;
 
             // Capped to 25ms to prevent difficulty calculation breaking from simultaneous objects.
             AdjustedDeltaTime = Math.Max(DeltaTime, MIN_DELTA_TIME);
@@ -396,6 +400,15 @@ namespace osu.Game.Rulesets.Osu.Difficulty.Preprocessing
                 if (i == nestedObjects.Count - 1)
                     LazyEndPosition = currCursorPosition;
             }
+
+            if (mods.OfType<OsuModStrictTracking>().Any())
+            {
+                double strictVelocity = calculateStrictSliderVelocity(slider);
+                double strictDistance = strictVelocity * slider.LazyTravelTime;
+
+                Console.WriteLine($"Normal = {slider.LazyTravelDistance:0.00}, Strict = {strictDistance:0.00}");
+                slider.LazyTravelDistance = Math.Max(slider.LazyTravelDistance, (float)strictDistance);
+            }
         }
 
         private static Vector2 positionWithRepeats(double relativeTime, Slider slider)
@@ -406,10 +419,14 @@ namespace osu.Game.Rulesets.Osu.Difficulty.Preprocessing
             return slider.Position + slider.Path.PositionAt(progress);
         }
 
-        private void calculateStrictSliderPath(Slider slider)
+        private double calculateStrictSliderVelocity(Slider slider)
         {
+            //Console.WriteLine($"Calculating strict path for {slider.StartTime}");
+
+            float scalingFactor = (float)(NORMALISED_RADIUS / slider.Radius);
+
             double updateDistance = slider.Radius;
-            float followCircleRadius = (float)(slider.Radius * 2.4);
+            float followCircleRadius = assumed_slider_radius / scalingFactor;
 
             // WARNING, this is lazer-correct implementation because stable doesn't have Strict Tracking mod
             // This means that path of this function can be lower than normal path
@@ -417,6 +434,8 @@ namespace osu.Game.Rulesets.Osu.Difficulty.Preprocessing
                 slider.StartTime + slider.Duration + SliderEventGenerator.TAIL_LENIENCY,
                 slider.NestedHitObjects.LastOrDefault(n => n is not SliderTailCircle)?.StartTime ?? double.MinValue
             );
+
+            trackingEndTime = Math.Max(trackingEndTime, slider.StartTime + slider.Duration / 2);
 
             OsuHitObject head;
             if (slider.RepeatCount == 0)
@@ -427,12 +446,17 @@ namespace osu.Game.Rulesets.Osu.Difficulty.Preprocessing
             var tail = (OsuHitObject)slider.NestedHitObjects[^1];
 
             double totalTrackingTime = trackingEndTime - head.StartTime;
+            if (totalTrackingTime == 0)
+                return 0;
+
             double numberOfUpdates = Math.Ceiling(slider.Path.Distance / updateDistance);
 
             double deltaT = totalTrackingTime / numberOfUpdates;
 
             double totalPath = 0;
             Vector2 currentCursorPosition = head.StackedPosition;
+
+            double peakVelocity = 0;
             double lastTimeWithMovement = 0;
 
             for (double relativeTime = 0; relativeTime <= totalTrackingTime; relativeTime += deltaT)
@@ -445,12 +469,17 @@ namespace osu.Game.Rulesets.Osu.Difficulty.Preprocessing
                 if (distanceToCursor <= followCircleRadius)
                     continue;
 
-                lastTimeWithMovement = relativeTime;
                 float neededMovement = distanceToCursor - followCircleRadius;
+                double currentVelocity = neededMovement / (relativeTime - lastTimeWithMovement);
+                peakVelocity = Math.Max(peakVelocity, currentVelocity);
+
+                lastTimeWithMovement = relativeTime;
 
                 totalPath += neededMovement;
                 currentCursorPosition = Vector2.Lerp(currentCursorPosition, ballPosition, neededMovement / distanceToCursor);
             }
+
+            return peakVelocity * scalingFactor;
         }
 
         private double calculateSliderAngle(OsuDifficultyHitObject lastDifficultyObject, Vector2 lastLastCursorPosition)
